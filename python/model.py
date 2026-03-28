@@ -1,20 +1,59 @@
 import numpy as np
 import torch
 
+class PACTFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, alpha, k):
+        ctx.save_for_backward(x, alpha)
+        # y_1 = 0.5 * ( torch.abs(x).detach() - torch.abs(x - alpha).detach() + alpha.item() )
+        y = torch.clamp(x, min = 0, max = alpha.item())
+        scale = (2**k - 1) / alpha
+        y_q = torch.round( y * scale) / scale
+        return y_q
 
+    @staticmethod
+    def backward(ctx, dLdy_q):
+        # Backward function, I borrowed code from
+        # https://github.com/obilaniu/GradOverride/blob/master/functional.py
+        # We get dL / dy_q as a gradient
+        x, alpha, = ctx.saved_tensors
+        # Weight gradient is only valid when [0, alpha]
+        # Actual gradient for alpha,
+        # By applying Chain Rule, we get dL / dy_q * dy_q / dy * dy / dalpha
+        # dL / dy_q = argument,  dy_q / dy * dy / dalpha = 0, 1 with x value range 
+        lower_bound      = x < 0
+        upper_bound      = x > alpha
+        # x_range       = 1.0-lower_bound-upper_bound
+        x_range = ~(lower_bound|upper_bound)
+        grad_alpha = torch.sum(dLdy_q * torch.ge(x, alpha).float()).view(-1)
+        return dLdy_q * x_range.float(), grad_alpha, None
+
+class PACT(torch.nn.Module):
+    def __init__(self, k=4, alpha_init=10.0):
+        super(PACT, self).__init__()
+        self.k = k
+        # alpha — это обучаемый параметр, поэтому оборачиваем его в nn.Parameter
+        self.alpha = torch.nn.Parameter(torch.tensor(alpha_init))
+
+    def forward(self, x):
+        return PACTFunction.apply(x, self.alpha, self.k)
+    
 class PointWiseFeedForward(torch.nn.Module):
-    def __init__(self, hidden_units, dropout_rate):
+    def __init__(self, hidden_units, dropout_rate, use_pact=False, num_bits=8):
 
         super(PointWiseFeedForward, self).__init__()
 
         self.conv1 = torch.nn.Conv1d(hidden_units, hidden_units, kernel_size=1)
         self.dropout1 = torch.nn.Dropout(p=dropout_rate)
-        self.relu = torch.nn.ReLU()
+        if use_pact:
+            self.activation = PACT(k=num_bits)
+        else:
+            self.activation = torch.nn.ReLU()
         self.conv2 = torch.nn.Conv1d(hidden_units, hidden_units, kernel_size=1)
         self.dropout2 = torch.nn.Dropout(p=dropout_rate)
 
     def forward(self, inputs):
-        outputs = self.dropout2(self.conv2(self.relu(self.dropout1(self.conv1(inputs.transpose(-1, -2))))))
+        outputs = self.dropout2(self.conv2(self.activation(self.dropout1(self.conv1(inputs.transpose(-1, -2))))))
         outputs = outputs.transpose(-1, -2) # as Conv1D requires (N, C, Length)
         return outputs
 
@@ -56,7 +95,12 @@ class SASRec(torch.nn.Module):
             new_fwd_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
             self.forward_layernorms.append(new_fwd_layernorm)
 
-            new_fwd_layer = PointWiseFeedForward(args.hidden_units, args.dropout_rate)
+            new_fwd_layer = PointWiseFeedForward(
+                args.hidden_units, 
+                args.dropout_rate, 
+                use_pact=args.use_pact, 
+                num_bits=args.num_bits
+            )
             self.forward_layers.append(new_fwd_layer)
 
             # self.pos_sigmoid = torch.nn.Sigmoid()

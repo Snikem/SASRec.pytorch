@@ -28,6 +28,10 @@ parser.add_argument('--inference_only', default=False, type=str2bool)
 parser.add_argument('--state_dict_path', default=None, type=str)
 parser.add_argument('--norm_first', action='store_true', default=False)
 
+parser.add_argument('--use_pact', default=False, type=str2bool, help='Use PACT activation instead of ReLU')
+parser.add_argument('--num_bits', default=8, type=int, help='Number of bits for PACT quantization')
+parser.add_argument('--l2_alpha', default=0.0001, type=float, help='L2 regularization weight for PACT alpha')
+
 args = parser.parse_args()
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
     os.makedirs(args.dataset + '_' + args.train_dir)
@@ -54,6 +58,7 @@ if __name__ == '__main__':
     f.write('epoch (val_ndcg, val_hr) (test_ndcg, test_hr)\n')
     
     sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
+
     model = SASRec(usernum, itemnum, args).to(args.device) # no ReLU activation in original SASRec implementation?
     
     for name, param in model.named_parameters():
@@ -73,7 +78,7 @@ if __name__ == '__main__':
     epoch_start_idx = 1
     if args.state_dict_path is not None:
         try:
-            model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
+            model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)), strict=False)
             tail = args.state_dict_path[args.state_dict_path.find('epoch=') + 6:]
             epoch_start_idx = int(tail[:tail.find('.')]) + 1
         except: # in case your pytorch version is not 1.6 etc., pls debug by pdb if load weights failed
@@ -111,10 +116,16 @@ if __name__ == '__main__':
             loss += bce_criterion(neg_logits[indices], neg_labels[indices])
             # torch.norm(param) returns the square root of the sum of squared weights (‖w‖₂), 
             # should be torch.norm(param)**2 or the way below which is faster.
-            for param in model.item_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2)    
+            for param in model.item_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2)   
+
+            if args.use_pact:
+                for name, param in model.named_parameters():
+                    if 'alpha' in name:
+                        loss += args.l2_alpha * torch.sum(param ** 2)
+
             loss.backward()
             adam_optimizer.step()
-            print("loss in epoch {} iteration {}: {}".format(epoch, step, loss.item())) # expected 0.4~0.6 after init few epochs
+            #print("loss in epoch {} iteration {}: {}".format(epoch, step, loss.item())) # expected 0.4~0.6 after init few epochs
 
         if epoch % 20 == 0:
             model.eval()
