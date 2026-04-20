@@ -1,7 +1,7 @@
 import time
 import torch
 import numpy as np
-from model import SASRec
+from SASRec.python.model import SASRec
 
 # Создаем класс-заглушку для аргументов, чтобы не писать argparse заново
 class MockArgs:

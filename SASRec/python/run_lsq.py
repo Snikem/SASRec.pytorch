@@ -5,8 +5,8 @@ import torch.nn as nn
 import numpy as np
 
 # Импортируем классы из вашего репозитория
-from model import SASRec
-from utils import *
+from SASRec.python.model import SASRec
+from SASRec.python.utils import *
 
 # Правильный импорт для LSQ в новых версиях PyTorch
 from torch.ao.quantization.fake_quantize import FakeQuantize

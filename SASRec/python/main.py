@@ -3,8 +3,8 @@ import time
 import torch
 import argparse
 
-from model import SASRec
-from utils import *
+from SASRec.python.model import SASRec
+from SASRec.python.utils import *
 
 def str2bool(s):
     if s not in {'false', 'true'}:
