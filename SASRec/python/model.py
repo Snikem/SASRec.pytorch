@@ -1,5 +1,77 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
+import math
+
+class LSQFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, s, Qn, Qp):
+        ctx.save_for_backward(x, s)
+        ctx.Qn = Qn
+        ctx.Qp = Qp
+        
+        # Масштабируем, клипаем, округляем и возвращаем масштаб
+        x_scaled = x / s
+        x_clipped = torch.clamp(x_scaled, Qn, Qp)
+        x_rounded = torch.round(x_clipped)
+        x_quant = x_rounded * s
+        
+        return x_quant
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, s = ctx.saved_tensors
+        Qn, Qp = ctx.Qn, ctx.Qp
+        
+        x_scaled = x / s
+        
+        # Маски для STE
+        mask_lt = (x_scaled < Qn).float()
+        mask_gt = (x_scaled > Qp).float()
+        mask_mid = 1.0 - mask_lt - mask_gt
+        
+        # Градиент по входу (активациям/весам)
+        grad_x = grad_output * mask_mid
+        
+        # Градиент по шагу квантования (scale)
+        grad_s_mid = torch.round(x_scaled) - x_scaled
+        grad_s_lt = Qn * torch.ones_like(x)
+        grad_s_gt = Qp * torch.ones_like(x)
+        
+        grad_s = grad_output * (grad_s_mid * mask_mid + grad_s_lt * mask_lt + grad_s_gt * mask_gt)
+        grad_s = grad_s.sum().view(1) # Скаляр
+        
+        return grad_x, grad_s, None, None
+
+class LSQ(torch.nn.Module):
+    def __init__(self, num_bits=8, is_unsigned=True):
+        super(LSQ, self).__init__()
+        self.num_bits = num_bits
+        
+        # Если is_unsigned=True, LSQ работает как ReLU (от 0 до 2^k - 1)
+        if is_unsigned:
+            self.Qn = 0
+            self.Qp = 2**num_bits - 1
+        else:
+            self.Qn = -(2**(num_bits - 1))
+            self.Qp = 2**(num_bits - 1) - 1
+            
+        self.s = torch.nn.Parameter(torch.ones(1))
+        self.is_initialized = False
+
+    def init_scale(self, x):
+        mean_val = x.detach().abs().mean()
+        # Инициализируем на том же устройстве (CPU/GPU), что и тензор x
+        init_val = 2 * mean_val / math.sqrt(self.Qp) if mean_val > 0 else torch.tensor([0.01], device=x.device)
+        self.s.data.copy_(init_val.to(self.s.device))
+        self.is_initialized = True
+
+    def forward(self, x):
+        if not self.is_initialized and self.training:
+            self.init_scale(x)
+            
+        s_pos = torch.abs(self.s) + 1e-8 # Защита от деления на ноль и отрицательного масштаба
+        return LSQFunction.apply(x, s_pos, self.Qn, self.Qp)
 
 class PACTFunction(torch.autograd.Function):
     @staticmethod
@@ -39,22 +111,55 @@ class PACT(torch.nn.Module):
         return PACTFunction.apply(x, self.alpha, self.k)
     
 class PointWiseFeedForward(torch.nn.Module):
-    def __init__(self, hidden_units, dropout_rate, use_pact=False, num_bits=8):
-
+    def __init__(self, hidden_units, dropout_rate, quant_method='none', num_bits=8):
+        self.quant_method = quant_method
         super(PointWiseFeedForward, self).__init__()
 
         self.conv1 = torch.nn.Conv1d(hidden_units, hidden_units, kernel_size=1)
         self.dropout1 = torch.nn.Dropout(p=dropout_rate)
-        if use_pact:
+
+        if quant_method == 'pact':
             self.activation = PACT(k=num_bits)
+        elif quant_method == 'lsq':
+            # is_unsigned=True обрезает все, что меньше 0 (заменяет ReLU)
+            self.activation = LSQ(num_bits=num_bits, is_unsigned=True)
         else:
             self.activation = torch.nn.ReLU()
         self.conv2 = torch.nn.Conv1d(hidden_units, hidden_units, kernel_size=1)
         self.dropout2 = torch.nn.Dropout(p=dropout_rate)
 
+        if quant_method == 'lsq':
+            # Для весов всегда используем is_unsigned=False (от -128 до 127)
+            self.weight_quantizer1 = LSQ(num_bits=num_bits, is_unsigned=False)
+            self.weight_quantizer2 = LSQ(num_bits=num_bits, is_unsigned=False)
+
     def forward(self, inputs):
-        outputs = self.dropout2(self.conv2(self.activation(self.dropout1(self.conv1(inputs.transpose(-1, -2))))))
-        outputs = outputs.transpose(-1, -2) # as Conv1D requires (N, C, Length)
+       # Подготавливаем тензор для Conv1D (N, C, L)
+        x = inputs.transpose(-1, -2)
+        
+        # --- Первый слой Conv1D ---
+        if self.quant_method == 'lsq':
+            # 1. Квантуем веса "на лету"
+            q_weight1 = self.weight_quantizer1(self.conv1.weight)
+            # 2. Используем функциональную свертку (сохраняем граф для backprop)
+            x = F.conv1d(x, q_weight1, self.conv1.bias)
+        else:
+            x = self.conv1(x)
+            
+        x = self.dropout1(x)
+        x = self.activation(x) # Здесь применяется PACT или LSQ для активаций
+        
+        # --- Второй слой Conv1D ---
+        if self.quant_method == 'lsq':
+            q_weight2 = self.weight_quantizer2(self.conv2.weight)
+            x = F.conv1d(x, q_weight2, self.conv2.bias)
+        else:
+            x = self.conv2(x)
+            
+        x = self.dropout2(x)
+        
+        # Возвращаем размерность обратно
+        outputs = x.transpose(-1, -2) 
         return outputs
 
 # pls use the following self-made multihead attention layer
@@ -83,6 +188,8 @@ class SASRec(torch.nn.Module):
 
         self.last_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
 
+        quant_method = getattr(args, 'quant_method', 'none')
+
         for _ in range(args.num_blocks):
             new_attn_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
             self.attention_layernorms.append(new_attn_layernorm)
@@ -98,7 +205,7 @@ class SASRec(torch.nn.Module):
             new_fwd_layer = PointWiseFeedForward(
                 args.hidden_units, 
                 args.dropout_rate, 
-                use_pact=args.use_pact, 
+                quant_method=quant_method, 
                 num_bits=args.num_bits
             )
             self.forward_layers.append(new_fwd_layer)
