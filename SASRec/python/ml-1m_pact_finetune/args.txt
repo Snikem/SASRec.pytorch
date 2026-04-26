@@ -1,3 +1,4 @@
+adaround_lambda,0.01
 batch_size,128
 dataset,ml-1m
 device,cuda
@@ -11,8 +12,9 @@ maxlen,200
 norm_first,False
 num_bits,8
 num_blocks,2
-num_epochs,1000
+num_epochs,100
 num_heads,1
-state_dict_path,ml-1m_default/SASRec.epoch=100.lr=0.001.layer=2.head=1.hidden=50.maxlen=200.pth
+quant_method,pact
+state_dict_path,ml-1m_default/SASRec.epoch=140.lr=0.001.layer=2.head=1.hidden=50.maxlen=200.pth
 train_dir,pact_finetune
-use_pact,True
+use_pact,False

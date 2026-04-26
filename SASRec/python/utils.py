@@ -22,18 +22,15 @@ def build_index(dataset_name):
 
     return u2i_index, i2u_index
 
-# sampler for batch generation
 def random_neq(l, r, s):
     t = np.random.randint(l, r)
     while t in s:
         t = np.random.randint(l, r)
     return t
 
-
 def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_queue, SEED):
     def sample(uid):
 
-        # uid = np.random.randint(1, usernum + 1)
         while len(user_train[uid]) <= 1: uid = np.random.randint(1, usernum + 1)
 
         seq = np.zeros([maxlen], dtype=np.int32)
@@ -46,7 +43,7 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
         for i in reversed(user_train[uid][:-1]):
             seq[idx] = i
             pos[idx] = nxt
-            neg[idx] = random_neq(1, itemnum + 1, ts)          # Don't need "if nxt != 0"
+            neg[idx] = random_neq(1, itemnum + 1, ts)
             nxt = i
             idx -= 1
             if idx == -1: break
@@ -64,7 +61,6 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
             one_batch.append(sample(uids[counter % usernum]))
             counter += 1
         result_queue.put(zip(*one_batch))
-
 
 class WarpSampler(object):
     def __init__(self, User, usernum, itemnum, batch_size=64, maxlen=10, n_workers=1):
@@ -91,8 +87,6 @@ class WarpSampler(object):
             p.terminate()
             p.join()
 
-
-# train/val/test data generation
 def data_partition(fname):
     usernum = 0
     itemnum = 0
@@ -100,7 +94,7 @@ def data_partition(fname):
     user_train = {}
     user_valid = {}
     user_test = {}
-    # assume user/item index starting from 1
+
     f = open('data/%s.txt' % fname, 'r')
     for line in f:
         u, i = line.rstrip().split(' ')
@@ -112,7 +106,7 @@ def data_partition(fname):
 
     for user in User:
         nfeedback = len(User[user])
-        if nfeedback < 4:                          # To be rigorous, the training set needs at least two data points to learn
+        if nfeedback < 4:
             user_train[user] = User[user]
             user_valid[user] = []
             user_test[user] = []
@@ -124,8 +118,6 @@ def data_partition(fname):
             user_test[user].append(User[user][-1])
     return [user_train, user_valid, user_test, usernum, itemnum]
 
-# TODO: merge evaluate functions for test and val set
-# evaluate on test set
 def evaluate(model, dataset, args):
     [train, valid, test, usernum, itemnum] = copy.deepcopy(dataset)
 
@@ -158,7 +150,7 @@ def evaluate(model, dataset, args):
             item_idx.append(t)
 
         predictions = -model.predict(*[np.array(l) for l in [[u], [seq], item_idx]])
-        predictions = predictions[0] # - for 1st argsort DESC
+        predictions = predictions[0]
 
         rank = predictions.argsort().argsort()[0].item()
 
@@ -173,8 +165,6 @@ def evaluate(model, dataset, args):
 
     return NDCG / valid_user, HT / valid_user
 
-
-# evaluate on val set
 def evaluate_valid(model, dataset, args):
     [train, valid, test, usernum, itemnum] = copy.deepcopy(dataset)
 
