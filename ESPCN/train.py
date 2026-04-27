@@ -1,5 +1,6 @@
 import argparse
 
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,6 +17,7 @@ from quantization.lsq import NetLSQ
 from quantization.pact import NetPACTActivations
 from quantization.tqt import NetTQT
 from quantization.apot import NetAPoTActivations
+from quantization.ada_round import NetAdaRound, adaround_optimize
 
 def psnr_from_mse(mse: float, max_val: float = 1.0) -> float:
     if mse <= 0:
@@ -54,6 +56,12 @@ def build_model(kind: str, upscale_factor: int, pretrained_model = None, w_bits=
             quantize_input=quantize_last,
             pretrained_fp32=pretrained_model
         )
+    if kind == "ada_round":
+        return NetAdaRound(
+            fp32_espcn=pretrained_model,
+            upscale_factor=upscale_factor,
+            bits=w_bits,
+        ) 
     raise ValueError(f"Unknown model kind: {kind}")
 
 
@@ -105,6 +113,10 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=LR)
     scheduler = MultiStepLR(optimizer, milestones=[30, 80], gamma=0.1)
     
+    if MODEL_TYPE == "ada_round":
+        adaround_optimize(pretrained_model, model, train_loader)
+        torch.save(model.state_dict(), PLOT_PATH[:-4] + "_last.pth")
+        sys.exit(0)
 
     epochs_hist = []
     train_loss_hist = []
@@ -212,3 +224,4 @@ if __name__ == "__main__":
         redraw()
 
     torch.save(model.state_dict(), PLOT_PATH[:-4] + "_last.pth")
+    
