@@ -41,7 +41,7 @@ class AdaRoundWeightQuantizer(nn.Module):
         v0 = torch.log(inv / (1 - inv))
         self.v = nn.Parameter(v0)
 
-        self.hard = False
+        self.hard = False  # if True -> hard rounding
 
     def set_hard(self, hard: bool = True):
         self.hard = hard
@@ -60,6 +60,10 @@ class AdaRoundWeightQuantizer(nn.Module):
         return w_q
 
     def regularization_loss(self):
+        """
+        AdaRound regularizer: encourages h(v) to go to 0 or 1 (hard decisions)
+        r = sum( 1 - |2h-1|^beta )
+        """
         h = self.h()
         reg = torch.sum(1.0 - torch.abs(2.0 * h - 1.0).pow(self.beta))
         return reg
@@ -88,10 +92,10 @@ class AdaRoundConv2d(nn.Module):
         return self.wq.regularization_loss()
 
 class NetAdaRound(nn.Module):
-    def __init__(self, fp32_espcn: nn.Module, bits=8):
+    def __init__(self, fp32_espcn: nn.Module, upscale_factor=3, bits=8):
         super().__init__()
-        self.relu = fp32_espcn.relu
-        self.pixel_shuffle = fp32_espcn.pixel_shuffle
+        self.relu = nn.ReLU(inplace=True)
+        self.pixel_shuffle = nn.PixelShuffle(upscale_factor)
 
         self.conv1 = AdaRoundConv2d(fp32_espcn.conv1, bits=bits)
         self.conv2 = AdaRoundConv2d(fp32_espcn.conv2, bits=bits)
@@ -119,6 +123,7 @@ def adaround_optimize(fp32_model, adaround_model, calib_loader, iters=2000, lr=1
     fp32_model.eval().to(device)
     adaround_model.train().to(device)
 
+    # Freeze weights & biases; optimize only v parameters
     for n, p in adaround_model.named_parameters():
         p.requires_grad = ("wq.v" in n)  # только v
 
